@@ -41,12 +41,53 @@ done
 
 # ---- 2. compile ----------------------------------------------------------
 echo "[2/4] Compiling chrome_device_policy.proto..."
-if command -v protoc >/dev/null 2>&1; then
-  protoc -I "$TMP" --python_out="$DIR" "$TMP/chrome_device_policy.proto"
+
+get_protoc() {
+  if command -v protoc >/dev/null 2>&1; then
+    PROTOC=protoc; PROTOC_INC=""; return 0
+  fi
+
+  case "$(uname -m)" in
+    x86_64|amd64)  parch=x86_64 ;;
+    aarch64|arm64) parch=aarch_64 ;;
+    *) echo "  unsupported arch: $(uname -m)" >&2; return 1 ;;
+  esac
+
+  # Match protoc to the installed Python protobuf (4.25.3 -> 25.3, 3.20.3 -> 3.20.3)
+  pyver=$(python3 -c 'import google.protobuf as p; print(p.__version__)' 2>/dev/null || true)
+  case "$pyver" in
+    "")  ver=25.3 ;;
+    3.*) ver=$pyver ;;
+    *)   ver=${pyver#*.} ;;
+  esac
+
+  PDIR="$DIR/.protoc"
+  if [ ! -x "$PDIR/bin/protoc" ]; then
+    echo "  downloading protoc $ver ($parch)..."
+    mkdir -p "$PDIR"
+    url="https://github.com/protocolbuffers/protobuf/releases/download/v$ver/protoc-$ver-linux-$parch.zip"
+    curl -fsSL "$url" -o "$TMP/protoc.zip" || { echo "  download failed: $url" >&2; return 1; }
+    python3 - "$TMP/protoc.zip" "$PDIR" <<'PYZ'
+import sys, zipfile
+zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])
+PYZ
+    chmod +x "$PDIR/bin/protoc"
+  fi
+
+  # Test it actually runs (some ChromeOS mounts are noexec)
+  "$PDIR/bin/protoc" --version >/dev/null 2>&1 || { echo "  downloaded protoc can't execute here" >&2; return 1; }
+  PROTOC="$PDIR/bin/protoc"
+  PROTOC_INC="-I $PDIR/include"
+  return 0
+}
+
+if get_protoc; then
+  # shellcheck disable=SC2086
+  "$PROTOC" -I "$TMP" $PROTOC_INC --python_out="$DIR" "$TMP/chrome_device_policy.proto"
 elif python3 -c 'import grpc_tools' >/dev/null 2>&1; then
   python3 -m grpc_tools.protoc -I "$TMP" --python_out="$DIR" "$TMP/chrome_device_policy.proto"
 else
-  echo "Neither protoc nor grpc_tools found. Install one (e.g. 'emerge protobuf' or 'pip install grpcio-tools')." >&2
+  echo "Could not get protoc. Try: pip install grpcio-tools" >&2
   exit 1
 fi
 [ -f "$DIR/chrome_device_policy_pb2.py" ] || { echo "Compile produced no pb2 file" >&2; exit 1; }
